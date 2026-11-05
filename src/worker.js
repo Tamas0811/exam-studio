@@ -132,13 +132,13 @@ Grade the answer. Return JSON: {"verdict":"good|partial|weak","comment":"one or 
 async function gemini(env, prompt) {
   const models = [];
   if (resolvedModel) models.push(resolvedModel);
-  models.push(env.GEMINI_MODEL || "gemini-flash-latest", "gemini-2.5-flash");
+  models.push(env.GEMINI_MODEL || "gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-2.5-flash-lite");
   let lastErr;
   for (const model of [...new Set(models)]) {
     const res = await call(env, model, prompt);
     if (res.ok) { resolvedModel = model; return res.data; }
     lastErr = res.error;
-    if (res.status !== 404 && res.status !== 400) break;
+    if (![400, 404, 429].includes(res.status)) break;
   }
   // Model names change over time: ask Google which Flash models exist and use the first.
   if (!resolvedModel) {
@@ -146,9 +146,11 @@ async function gemini(env, prompt) {
       { headers: { "x-goog-api-key": env.GEMINI_API_KEY } });
     if (list.ok) {
       const { models: all = [] } = await list.json();
-      const flash = all.filter((m) => /flash/.test(m.name) && !/lite|image|tts|live|audio/.test(m.name)
-        && (m.supportedGenerationMethods || []).includes("generateContent"));
-      for (const m of flash.reverse()) {
+      // Prefer Flash Lite (much higher free-tier daily limit), then other Flash models.
+      const ok = all.filter((m) => /flash/.test(m.name) && !/image|tts|live|audio|preview/.test(m.name)
+        && (m.supportedGenerationMethods || []).includes("generateContent")).reverse();
+      const flash = [...ok.filter((m) => /lite/.test(m.name)), ...ok.filter((m) => !/lite/.test(m.name))].slice(0, 4);
+      for (const m of flash) {
         const name = m.name.replace(/^models\//, "");
         const res = await call(env, name, prompt);
         if (res.ok) { resolvedModel = name; return res.data; }

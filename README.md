@@ -47,7 +47,7 @@ python3 tools/build_interp.py public/data
 2. Build command: *(leave empty)* · Deploy command: `npx wrangler deploy`.
 3. After the first deploy: the Worker → **Settings → Variables and Secrets → Add** →
    type **Secret**, name `GEMINI_API_KEY`, value = your Google AI Studio key.
-4. Optional: change `GEMINI_MODEL` in `wrangler.jsonc` (default `gemini-flash-latest`; the worker
+4. Optional: change `GEMINI_MODEL` in `wrangler.jsonc` (default `gemini-3.5-flash-lite`, chosen for its higher free-tier daily limit; the worker
    falls back to any available Flash model automatically).
 
 Every push to `main` redeploys the site.
