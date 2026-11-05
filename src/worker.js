@@ -7,6 +7,7 @@ const MAX_BODY = 20_000;          // bytes accepted per request
 const RATE = { windowMs: 60_000, max: 30 };
 const hits = new Map();           // best-effort per-IP limit (per Worker instance)
 let resolvedModel = null;
+const trace = [];   // per-request attempt log, sent back in a header for debugging
 
 export default {
   async fetch(request, env) {
@@ -50,8 +51,11 @@ async function examine(request, env) {
   if (!prompt) return json({ error: "bad_mode" }, 400);
 
   try {
+    const t0 = Date.now(); trace.length = 0;
     const out = await gemini(env, prompt);
-    return json(out);
+    const r = json(out);
+    r.headers.set("x-examiner", `${resolvedModel} ${Date.now() - t0}ms ${trace.join(" ")}`.slice(0, 300));
+    return r;
   } catch (e) {
     return json({ error: "ai_failed", detail: String(e.message || e).slice(0, 200) }, 502);
   }
@@ -184,8 +188,10 @@ async function call(env, model, prompt) {
     if (/thinking/i.test(msg)) { thinkingSupported = false; return call(env, model, prompt); }
     return { ok: false, status: 400, error: `${model}: HTTP 400` };
   }
+  trace.push(`${model}:${res.status}`);
   if (!res.ok) return { ok: false, status: res.status, error: `${model}: HTTP ${res.status}` };
   const data = await res.json();
+  const u = data?.usageMetadata; if (u) trace.push(`out=${u.candidatesTokenCount || 0} think=${u.thoughtsTokenCount || 0}`);
   const text = data?.candidates?.[0]?.content?.parts?.filter((p) => !p.thought).map((p) => p.text || "").join("") || "";
   try {
     return { ok: true, data: JSON.parse(text.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, "")) };
