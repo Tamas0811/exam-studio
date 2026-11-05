@@ -23,7 +23,7 @@
   async function api(body) {
     if (aiReady === false) return null;
     try {
-      const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 25000);
+      const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 45000);
       const r = await fetch("/api/examine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: ctrl.signal });
       clearTimeout(t);
       if (!r.ok) return null;

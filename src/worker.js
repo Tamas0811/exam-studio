@@ -129,55 +129,66 @@ Grade the answer. Return JSON: {"verdict":"good|partial|weak","comment":"one or 
   return null;
 }
 
+const RETRY = [429, 500, 503, 504];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let thinkingSupported = true;   // switched off if the model rejects the thinking setting
+
 async function gemini(env, prompt) {
-  const models = [];
-  if (resolvedModel) models.push(resolvedModel);
-  models.push(env.GEMINI_MODEL || "gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-2.5-flash-lite");
+  const models = [...new Set([resolvedModel, env.GEMINI_MODEL || "gemini-3.5-flash-lite",
+    "gemini-flash-lite-latest", "gemini-2.5-flash-lite"].filter(Boolean))];
   let lastErr;
-  for (const model of [...new Set(models)]) {
-    const res = await call(env, model, prompt);
-    if (res.ok) { resolvedModel = model; return res.data; }
-    lastErr = res.error;
-    if (![400, 404, 429].includes(res.status)) break;
+  for (const model of models) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await call(env, model, prompt);
+      if (res.ok) { resolvedModel = model; return res.data; }
+      lastErr = res.error;
+      if (RETRY.includes(res.status) && attempt === 0) { await sleep(700); continue; }
+      break;
+    }
   }
-  // Model names change over time: ask Google which Flash models exist and use the first.
-  if (!resolvedModel) {
-    const list = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200",
-      { headers: { "x-goog-api-key": env.GEMINI_API_KEY } });
-    if (list.ok) {
-      const { models: all = [] } = await list.json();
-      // Prefer Flash Lite (much higher free-tier daily limit), then other Flash models.
-      const ok = all.filter((m) => /flash/.test(m.name) && !/image|tts|live|audio|preview/.test(m.name)
-        && (m.supportedGenerationMethods || []).includes("generateContent")).reverse();
-      const flash = [...ok.filter((m) => /lite/.test(m.name)), ...ok.filter((m) => !/lite/.test(m.name))].slice(0, 4);
-      for (const m of flash) {
-        const name = m.name.replace(/^models\//, "");
-        const res = await call(env, name, prompt);
-        if (res.ok) { resolvedModel = name; return res.data; }
-        lastErr = res.error;
-      }
+  // Model names change over time: ask Google which Flash models exist and try those.
+  const list = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200",
+    { headers: { "x-goog-api-key": env.GEMINI_API_KEY } });
+  if (list.ok) {
+    const { models: all = [] } = await list.json();
+    // Prefer Flash Lite (much higher free-tier daily limit), then other Flash models.
+    const ok = all.filter((m) => /flash/.test(m.name) && !/image|tts|live|audio|preview/.test(m.name)
+      && (m.supportedGenerationMethods || []).includes("generateContent")).reverse()
+      .map((m) => m.name.replace(/^models\//, "")).filter((n) => !models.includes(n));
+    for (const name of [...ok.filter((n) => /lite/.test(n)), ...ok.filter((n) => !/lite/.test(n))].slice(0, 3)) {
+      const res = await call(env, name, prompt);
+      if (res.ok) { resolvedModel = name; return res.data; }
+      lastErr = res.error;
     }
   }
   throw new Error(lastErr || "no model available");
 }
 
 async function call(env, model, prompt) {
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-    {
+  const generationConfig = { temperature: 0.3, responseMimeType: "application/json", maxOutputTokens: 1024 };
+  // Short, structured replies need little reasoning; low thinking keeps the examiner fast.
+  if (thinkingSupported) generationConfig.thinkingConfig = /^gemini-2/.test(model) ? { thinkingBudget: 0 } : { thinkingLevel: "low" };
+  let res;
+  try {
+    res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.3, responseMimeType: "application/json", maxOutputTokens: 1024 },
-      }),
-    },
-  );
+      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig }),
+      signal: AbortSignal.timeout(20000),
+    });
+  } catch (e) {
+    return { ok: false, status: 504, error: `${model}: timeout` };
+  }
+  if (res.status === 400 && thinkingSupported) {
+    const msg = await res.text();
+    if (/thinking/i.test(msg)) { thinkingSupported = false; return call(env, model, prompt); }
+    return { ok: false, status: 400, error: `${model}: HTTP 400` };
+  }
   if (!res.ok) return { ok: false, status: res.status, error: `${model}: HTTP ${res.status}` };
   const data = await res.json();
-  const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") || "";
+  const text = data?.candidates?.[0]?.content?.parts?.filter((p) => !p.thought).map((p) => p.text || "").join("") || "";
   try {
-    return { ok: true, data: JSON.parse(text.replace(/^```json\s*|```$/g, "")) };
+    return { ok: true, data: JSON.parse(text.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, "")) };
   } catch {
     return { ok: false, status: 500, error: `${model}: unreadable reply` };
   }
